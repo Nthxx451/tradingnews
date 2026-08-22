@@ -2,14 +2,12 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8" />
-<link rel="icon" type="image/jpg" href="logo.jpg">
-<link rel="apple-touch-icon" href="/logo.jpg">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="theme-color" content="#0B0D10" />
-<title>Trading News</title>
+<title>Trading Desk</title>
 <style>
   html, body { margin: 0; padding: 0; background: #0B0D10; overscroll-behavior-y: none; }
   body { padding-top: calc(env(safe-area-inset-top) + 16px); }
@@ -59,7 +57,6 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   Newspaper,
   LineChart,
-  CandlestickChart,
   Activity,
   Settings as SettingsIcon,
   PlayCircle,
@@ -84,10 +81,10 @@ const FONT_IMPORT = `
 `;
 
 const ASSETS = [
-  { id: "XAUUSD", label: "Or / Dollar", short: "XAU/USD", color: "#FFC93C" },
-  { id: "BTCUSD", label: "Bitcoin / Dollar", short: "BTC/USD", color: "#F7931A" },
+  { id: "XAUUSD", label: "Or / Dollar", short: "XAU/USD", color: "#FF3EA5" },
+  { id: "BTCUSD", label: "Bitcoin / Dollar", short: "BTC/USD", color: "#7B61FF" },
   { id: "EURUSD", label: "Euro / Dollar", short: "EUR/USD", color: "#4C8FFF" },
-  { id: "AAPL", label: "Apple Inc.", short: "AAPL", color: "#FFFFFF" },
+  { id: "AAPL", label: "Apple Inc.", short: "AAPL", color: "#38E1C6" },
 ];
 
 const ASSET_MAP = Object.fromEntries(ASSETS.map((a) => [a.id, a]));
@@ -209,21 +206,6 @@ const NEWS_EVENTS = [
 
 const IMPACT_LABEL = ["", "Faible", "Moyen", "Fort"];
 const IMPACT_COLOR = ["", "#2A4D8F", "#F5C518", "#E5484D"];
-
-// Démo de secours : reprend les items fictifs mais recale les jours/dates sur
-// aujourd'hui, pour garder la même fenêtre glissante de 4 jours que le direct.
-function buildDemoDays() {
-  const today = new Date();
-  return NEWS_EVENTS.map((g, i) => {
-    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() + i);
-    return {
-      dateKey: localDateKey(d),
-      day: frDayLabel(d),
-      date: frDateLabel(d),
-      items: g.items,
-    };
-  });
-}
 
 /* ------------------------------------------------------------------ */
 /* Mock scalping strategies (video links = recherche YouTube ciblée)  */
@@ -424,41 +406,25 @@ function frDayLabel(d) {
 function frDateLabel(d) {
   return new Date(d).toLocaleDateString("fr-FR", { day: "numeric", month: "long" });
 }
-function localDateKey(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-// The faireconomy feed serves valid JSON but sends no CORS headers and
-// rate-limits requests that carry a browser Origin header (HTTP 429), so it
-// can't be fetched directly from a web page. r.jina.ai is a CORS-enabled
-// reader that can reach it and echoes back the JSON (wrapped in a short
-// markdown header) — we use it first and keep direct + proxy routes as backup.
-function parseFFPayload(text) {
-  let t = (text || "").trim();
-  const start = t.indexOf("[");
-  const end = t.lastIndexOf("]");
-  if (start !== -1 && end > start) t = t.slice(start, end + 1);
-  return JSON.parse(t);
-}
 
 async function fetchCalendarFF() {
-  const host = "https://nfs.faireconomy.media/ff_calendar_thisweek.json";
-  const attempts = [
-    `https://r.jina.ai/${host}`,
-    host,
-    `https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json`,
+  const hosts = [
+    "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+    "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
   ];
-  CORS_PROXIES.forEach((makeProxyUrl) => attempts.push(makeProxyUrl(host)));
+  const attempts = [];
+  hosts.forEach((h) => {
+    attempts.push(h);
+    CORS_PROXIES.forEach((makeProxyUrl) => attempts.push(makeProxyUrl(h)));
+    attempts.push(`https://r.jina.ai/${h}`); // text-mode reader, last-resort bypass
+  });
   let lastErr = null;
   for (const url of attempts) {
     try {
       const r = await fetch(url);
       if (!r.ok) { lastErr = new Error("http-" + r.status); continue; }
       const text = await r.text();
-      const d = parseFFPayload(text);
+      const d = JSON.parse(text);
       if (Array.isArray(d) && d.length > 0) return d;
       lastErr = new Error("empty-or-not-array");
     } catch (e) {
@@ -476,9 +442,9 @@ function groupCalendar(raw) {
     if (assets.length === 0 || impact < 2 || !ev.date) return; // skip irrelevant currencies + low-impact noise
     const dateObj = new Date(ev.date);
     if (isNaN(dateObj)) return;
-    const dateKey = localDateKey(dateObj);
-    if (!byDate[dateKey]) byDate[dateKey] = [];
-    byDate[dateKey].push({
+    const dateKey = dateObj.toISOString().slice(0, 10);
+    if (!byDate[dateKey]) byDate[dateKey] = { dateObj, items: [] };
+    byDate[dateKey].items.push({
       time: dateObj.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }),
       title: ev.title,
       zone: ev.country,
@@ -488,23 +454,13 @@ function groupCalendar(raw) {
       sortKey: dateObj.getTime(),
     });
   });
-
-  // Fenêtre glissante : aujourd'hui + 3 jours. À chaque rafraîchissement (45 s),
-  // le jour précédent disparaît et un nouveau jour apparaît à la fin, dès qu'on
-  // passe minuit. Les jours sans actu macro restent affichés (message dédié).
-  const days = [];
-  const today = new Date();
-  for (let i = 0; i < 4; i++) {
-    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() + i);
-    const items = (byDate[localDateKey(d)] || []).sort((a, b) => a.sortKey - b.sortKey);
-    days.push({
-      dateKey: localDateKey(d),
-      day: frDayLabel(d),
-      date: frDateLabel(d),
-      items,
-    });
-  }
-  return days;
+  return Object.keys(byDate)
+    .sort()
+    .map((dateKey) => ({
+      day: frDayLabel(byDate[dateKey].dateObj),
+      date: frDateLabel(byDate[dateKey].dateObj),
+      items: byDate[dateKey].items.sort((a, b) => a.sortKey - b.sortKey),
+    }));
 }
 
 function useLiveCalendar(live) {
@@ -586,9 +542,6 @@ function useQuotesEngine(assetIds, live) {
           if (!q) return prev;
           const base = BASE_QUOTES[id];
           const spread = base.ask - base.bid;
-          // Premier ancrage réel : si le prix réel est loin du prix de démo,
-          // on recale la référence de session (open/haut/bas) sur le prix réel.
-          const bigJump = Math.abs(price - q.bid) > Math.max(base.step * 20, Math.abs(q.bid) * 0.01);
           return {
             ...prev,
             [id]: {
@@ -596,9 +549,8 @@ function useQuotesEngine(assetIds, live) {
               prevBid: q.bid,
               bid: price,
               ask: price + spread,
-              open: bigJump ? price : q.open,
-              low: bigJump ? price : Math.min(q.low, price),
-              high: bigJump ? price : Math.max(q.high, price),
+              low: Math.min(q.low, price),
+              high: Math.max(q.high, price),
             },
           };
         });
@@ -823,7 +775,7 @@ function NewsTab({ live }) {
   const [filter, setFilter] = useState("ALL");
   const calendar = useLiveCalendar(live);
   const isLive = calendar.status === "live" && calendar.days && calendar.days.length > 0;
-  const source = isLive ? calendar.days : buildDemoDays();
+  const source = isLive ? calendar.days : NEWS_EVENTS;
 
   const safeDayIdx = Math.min(dayIdx, source.length - 1);
   const selectedDay = source[safeDayIdx];
@@ -866,9 +818,7 @@ function NewsTab({ live }) {
       <div style={{ padding: "0 20px 100px" }}>
         {items.length === 0 && (
           <div style={{ color: "#6B7280", fontSize: 14, padding: "30px 0", textAlign: "center" }}>
-            {selectedDay && selectedDay.items.length === 0
-              ? "Aucune actu macro prévue ce jour-là."
-              : "Rien pour cet actif ce jour-là."}
+            Rien pour cet actif ce jour-là.
           </div>
         )}
         {items.map((item, idx) => (
@@ -1173,7 +1123,7 @@ function QuotesTab({ watchlist, live }) {
         >
           <Info size={14} color="#6B7280" style={{ flexShrink: 0, marginTop: 2 }} />
           <span style={{ fontFamily: "'Inter', sans-serif", fontSize: 11.5, color: "#6B7280", lineHeight: 1.5 }}>
-            « live » = prix réel (activé par défaut). « simulé » = marche aléatoire tant que la source ne répond pas. « erreur » = source injoignable.
+            « live » = prix réel branché en Réglages. « simulé » = marche aléatoire de démo tant qu'aucune source n'est connectée pour cet actif.
           </span>
         </div>
       </div>
@@ -1231,12 +1181,92 @@ function ToggleRow({ label, sub, checked, onChange }) {
   );
 }
 
-function SettingsTab({ watchlist, setWatchlist, notif, setNotif, highImpactOnly, setHighImpactOnly }) {
+function ApiKeyField({ label, sub, value, onChange, testStatus, onTest, testing, placeholder }) {
+  const statusColor = testStatus === "ok" ? "#2FBF71" : testStatus === "error" ? "#E5484D" : "#6B7280";
+  const statusLabel = testStatus === "ok" ? "Connecté" : testStatus === "error" ? "Échec" : "Non testé";
+  return (
+    <div
+      style={{
+        background: "#14171C",
+        border: "1px solid #22262D",
+        borderRadius: 12,
+        padding: 14,
+        marginBottom: 10,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8, gap: 8 }}>
+        <div>
+          <div style={{ fontFamily: "'Inter', sans-serif", fontSize: 14, fontWeight: 600, color: "#EDEBE6" }}>{label}</div>
+          {sub && <div style={{ fontFamily: "'Inter', sans-serif", fontSize: 11.5, color: "#6B7280", marginTop: 2 }}>{sub}</div>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0, paddingTop: 3 }}>
+          <div style={{ width: 6, height: 6, borderRadius: 999, background: statusColor }} />
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: statusColor }}>{statusLabel}</span>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          type="password"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          style={{
+            flex: 1,
+            background: "#0B0D10",
+            border: "1px solid #2A2E35",
+            borderRadius: 8,
+            padding: "9px 11px",
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 12.5,
+            color: "#EDEBE6",
+            outline: "none",
+            minWidth: 0,
+          }}
+        />
+        <button
+          onClick={onTest}
+          disabled={!value || testing}
+          style={{
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 12,
+            fontWeight: 600,
+            color: !value ? "#4A4F57" : "#EDEBE6",
+            background: "#1B1E24",
+            border: "1px solid #2A2E35",
+            borderRadius: 8,
+            padding: "0 14px",
+            flexShrink: 0,
+            opacity: testing ? 0.6 : 1,
+          }}
+        >
+          {testing ? "..." : "Tester"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SettingsTab({ watchlist, setWatchlist, notif, setNotif, highImpactOnly, setHighImpactOnly, live, setLive }) {
   const toggleAsset = (id) => {
     setWatchlist((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
   };
+
+  const [testing, setTesting] = useState({});
+  const [testResult, setTestResult] = useState({});
+
+  async function runTest(id, fn) {
+    setTesting((s) => ({ ...s, [id]: true }));
+    try {
+      await fn();
+      setTestResult((s) => ({ ...s, [id]: "ok" }));
+    } catch (e) {
+      setTestResult((s) => ({ ...s, [id]: "error" }));
+    } finally {
+      setTesting((s) => ({ ...s, [id]: false }));
+    }
+  }
 
   return (
     <div>
@@ -1272,6 +1302,85 @@ function SettingsTab({ watchlist, setWatchlist, notif, setNotif, highImpactOnly,
         />
 
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, letterSpacing: 1, color: "#6B7280", margin: "20px 0 10px", textTransform: "uppercase" }}>
+          Connexions temps réel — cotations
+        </div>
+
+        <ToggleRow
+          label="Bitcoin (CoinGecko)"
+          sub="Gratuit, sans clé — activable directement"
+          checked={live.BTCUSD}
+          onChange={() => setLive((v) => ({ ...v, BTCUSD: !v.BTCUSD }))}
+        />
+        <ToggleRow
+          label="Euro / Dollar (Frankfurter)"
+          sub="Gratuit, sans clé — activable directement"
+          checked={live.EURUSD}
+          onChange={() => setLive((v) => ({ ...v, EURUSD: !v.EURUSD }))}
+        />
+
+        <ApiKeyField
+          label="AAPL — clé Finnhub"
+          sub="Nécessite un compte gratuit sur finnhub.io"
+          value={live.aaplKey}
+          onChange={(v) => setLive((s) => ({ ...s, aaplKey: v }))}
+          placeholder="Colle ta clé API ici"
+          testing={!!testing.AAPL}
+          testStatus={testResult.AAPL}
+          onTest={() => runTest("AAPL", () => fetchAAPL(live.aaplKey))}
+        />
+        <ToggleRow
+          label="Activer AAPL en direct"
+          sub="Utilise la clé ci-dessus une fois testée"
+          checked={live.aaplEnabled}
+          onChange={() => setLive((v) => ({ ...v, aaplEnabled: !v.aaplEnabled }))}
+        />
+
+        <ApiKeyField
+          label="XAUUSD — clé fournisseur métaux"
+          sub="Type metalpriceapi.com — le CORS dépend du fournisseur, teste avant d'activer"
+          value={live.xauKey}
+          onChange={(v) => setLive((s) => ({ ...s, xauKey: v }))}
+          placeholder="Colle ta clé API ici"
+          testing={!!testing.XAUUSD}
+          testStatus={testResult.XAUUSD}
+          onTest={() => runTest("XAUUSD", () => fetchXAU(live.xauKey))}
+        />
+        <ToggleRow
+          label="Activer l'or en direct"
+          sub="Utilise la clé ci-dessus une fois testée"
+          checked={live.xauEnabled}
+          onChange={() => setLive((v) => ({ ...v, xauEnabled: !v.xauEnabled }))}
+        />
+
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, letterSpacing: 1, color: "#6B7280", margin: "20px 0 10px", textTransform: "uppercase" }}>
+          Connexion — calendrier économique
+        </div>
+        <ToggleRow
+          label="Calendrier économique (Forex Factory)"
+          sub="Gratuit, sans clé — le même flux utilisé par les EA MT5 pour filtrer les news"
+          checked={live.newsEnabled}
+          onChange={() => setLive((v) => ({ ...v, newsEnabled: !v.newsEnabled }))}
+        />
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "flex-start",
+            padding: 12,
+            background: "#14171C",
+            border: "1px dashed #2A2E35",
+            borderRadius: 10,
+          }}
+        >
+          <Info size={14} color="#6B7280" style={{ flexShrink: 0, marginTop: 2 }} />
+          <span style={{ fontFamily: "'Inter', sans-serif", fontSize: 11.5, color: "#6B7280", lineHeight: 1.5 }}>
+            Ce flux couvre les vraies publications macro (taux, inflation, emploi...) qui bougent le dollar et
+            l'euro. Les événements propres à une entreprise (ex. earnings AAPL) n'y sont pas — ça reste en démo
+            pour cette partie. Si l'activation échoue, l'onglet Actus repasse automatiquement en démo.
+          </span>
+        </div>
+
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, letterSpacing: 1, color: "#6B7280", margin: "20px 0 10px", textTransform: "uppercase" }}>
           À propos des données
         </div>
         <div
@@ -1283,621 +1392,12 @@ function SettingsTab({ watchlist, setWatchlist, notif, setNotif, highImpactOnly,
           }}
         >
           <p style={{ fontFamily: "'Inter', sans-serif", fontSize: 12.5, color: "#8A8F98", lineHeight: 1.6, margin: 0, marginBottom: 10 }}>
-            Toutes les sources temps réel sont activées par défaut : Bitcoin (CoinGecko), EUR/USD (Frankfurter),
-            AAPL (Finnhub) et l'or (metalpriceapi). Le calendrier économique est lui aussi en direct.
+            Bitcoin et EUR/USD peuvent tourner en vrai temps réel dès maintenant, sans rien configurer. AAPL et
+            l'or ont besoin d'une clé API personnelle — teste-la avant d'activer le direct.
           </p>
           <p style={{ fontFamily: "'Inter', sans-serif", fontSize: 12.5, color: "#8A8F98", lineHeight: 1.6, margin: 0 }}>
-            Si une source ne répond pas, l'actif repasse automatiquement en simulation et l'indicateur passe en « erreur ».
+            Les clés restent uniquement dans cet artifact, sur cet appareil.
           </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Tab: Graphique (live chart)                                        */
-/* ------------------------------------------------------------------ */
-// Candlestick (bougies japonaises) — live chart model.
-const TIMEFRAMES = [
-  { id: "M1", label: "M1", ms: 60 * 1000 },
-  { id: "M5", label: "M5", ms: 5 * 60 * 1000 },
-  { id: "M15", label: "M15", ms: 15 * 60 * 1000 },
-  { id: "H1", label: "H1", ms: 60 * 60 * 1000 },
-  { id: "H4", label: "H4", ms: 4 * 60 * 60 * 1000 },
-  { id: "D1", label: "D1", ms: 24 * 60 * 60 * 1000 },
-];
-const SEED_CANDLE_COUNT = 240;
-const MAX_CANDLES = 600;
-const MIN_VIEW_CANDLES = 8;
-const MAX_VIEW_CANDLES = 140;
-const DEFAULT_VIEW_CANDLES = 40;
-const CHART_PAD = { top: 12, right: 62, bottom: 24, left: 8 };
-
-// Combien d'historique générer selon la temporalité choisie.
-function seedCountFor(intervalMs) {
-  if (intervalMs >= 86400000) return 365; // D1 : ~1 an d'historique
-  if (intervalMs >= 3600000) return 300;  // H1 / H4
-  return 240;                             // M1 / M5 / M15
-}
-
-// Synthetic candle history (OHLC) ending on the asset's base bid so the live
-// candles continue it seamlessly. Momentum walk → realistic-looking candles.
-function seedCandles(id, n = SEED_CANDLE_COUNT, intervalMs = TIMEFRAMES[0].ms) {
-  const base = BASE_QUOTES[id];
-  const s = base.step;
-  const now = Date.now();
-  const bucket = Math.floor(now / intervalMs);
-  const closes = [];
-  let price = base.bid;
-  let vel = 0;
-  for (let i = 0; i < n; i++) {
-    vel = vel * 0.9 + (Math.random() - 0.5) * s * 0.7;
-    price += vel;
-    closes.push(price);
-  }
-  const shift = base.bid - closes[closes.length - 1];
-  const candles = [];
-  let prevClose = closes[0] + shift;
-  for (let i = 0; i < n; i++) {
-    const close = closes[i] + shift;
-    const open = i === 0 ? close - (Math.random() - 0.5) * s : prevClose;
-    const hi = Math.max(open, close) + Math.random() * s * 0.9;
-    const lo = Math.min(open, close) - Math.random() * s * 0.9;
-    candles.push({
-      t: (bucket - (n - 1 - i)) * intervalMs,
-      o: open,
-      h: hi,
-      l: lo,
-      c: close,
-    });
-    prevClose = close;
-  }
-  return candles;
-}
-
-// Étiquette de temps adaptée à la temporalité de la bougie.
-function candleTimeLabel(t, intervalMs) {
-  const d = new Date(t);
-  if (intervalMs >= 86400000) {
-    return d.toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
-  }
-  if (intervalMs >= 3600000) {
-    const dd = String(d.getDate()).padStart(2, "0");
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mi = String(d.getMinutes()).padStart(2, "0");
-    return `${dd}/${mm} ${hh}:${mi}`;
-  }
-  return d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-}
-
-function formatAxis(id, v) {
-  if (id === "EURUSD") return v.toFixed(4);
-  if (id === "BTCUSD") return v.toFixed(0);
-  if (id === "XAUUSD") return v.toFixed(1);
-  return v.toFixed(2);
-}
-
-function useMeasure(ref) {
-  const [width, setWidth] = useState(0);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const update = () => setWidth(el.clientWidth);
-    update();
-    if (typeof ResizeObserver !== "undefined") {
-      const ro = new ResizeObserver(update);
-      ro.observe(el);
-      return () => ro.disconnect();
-    }
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, []);
-  return width;
-}
-
-function CandleChartSvg({ candles, start, count, width, asset, intervalMs }) {
-  const W = width || 320;
-  const H = Math.min(340, Math.max(230, Math.round(W * 0.62)));
-  const PAD = CHART_PAD;
-  const innerW = W - PAD.left - PAD.right;
-  const innerH = H - PAD.top - PAD.bottom;
-
-  const visible = candles.slice(start, start + count);
-  let min = Infinity;
-  let max = -Infinity;
-  visible.forEach((c) => {
-    if (c.l < min) min = c.l;
-    if (c.h > max) max = c.h;
-  });
-  if (!(max > min)) {
-    const m = Math.abs(max) || 1;
-    max = m * 1.001;
-    min = m * 0.999;
-  }
-  const span = max - min;
-  min -= span * 0.08;
-  max += span * 0.08;
-
-  const step = innerW / Math.max(1, count);
-  const bodyW = Math.max(2, step * 0.62);
-  const y = (p) => PAD.top + innerH - ((p - min) / (max - min)) * innerH;
-
-  const grid = [0, 1, 2, 3, 4].map((i) => ({
-    v: max - ((max - min) * i) / 4,
-    yy: PAD.top + (innerH * i) / 4,
-  }));
-  // Au moins ~68 px entre deux étiquettes de temps, quel que soit le zoom.
-  const labelEvery = Math.max(1, Math.ceil(68 / step));
-
-  const lastCandle = visible[visible.length - 1];
-  const lastY = lastCandle ? y(lastCandle.c) : PAD.top;
-  const lastUp = lastCandle ? lastCandle.c >= lastCandle.o : true;
-  const lastColor = lastUp ? "#2FBF71" : "#FF3EA5";
-
-  return (
-    <svg width={W} height={H} style={{ display: "block" }}>
-      {grid.map((g, i) => (
-        <g key={i}>
-          <line x1={PAD.left} y1={g.yy} x2={W - PAD.right} y2={g.yy} stroke="#1F232A" strokeWidth={1} />
-          <text
-            x={W - PAD.right + 8}
-            y={g.yy + 3}
-            fill="#6B7280"
-            fontSize={9}
-            fontFamily="'JetBrains Mono', monospace"
-          >
-            {formatAxis(asset.id, g.v)}
-          </text>
-        </g>
-      ))}
-
-      {visible.map((c, i) => {
-        const xc = PAD.left + (i + 0.5) * step;
-        const up = c.c >= c.o;
-        const col = up ? "#2FBF71" : "#FF3EA5";
-        const yH = y(c.h);
-        const yL = y(c.l);
-        const yO = y(c.o);
-        const yC = y(c.c);
-        const bodyTop = Math.min(yO, yC);
-        const bodyH = Math.max(1, Math.abs(yC - yO));
-        return (
-          <g key={c.t}>
-            <line x1={xc} y1={yH} x2={xc} y2={yL} stroke={col} strokeWidth={1.2} />
-            <rect
-              x={xc - bodyW / 2}
-              y={bodyTop}
-              width={bodyW}
-              height={bodyH}
-              fill={col}
-              stroke={col}
-              strokeWidth={1}
-              rx={0.8}
-            />
-            {i % labelEvery === 0 && (
-              <text
-                x={xc}
-                y={H - 7}
-                textAnchor="middle"
-                fontSize={9}
-                fill="#6B7280"
-                fontFamily="'JetBrains Mono', monospace"
-              >
-                {candleTimeLabel(c.t, intervalMs)}
-              </text>
-            )}
-          </g>
-        );
-      })}
-
-      {lastCandle && (
-        <g>
-          <line
-            x1={PAD.left}
-            y1={lastY}
-            x2={W - PAD.right}
-            y2={lastY}
-            stroke={lastColor}
-            strokeOpacity={0.4}
-            strokeDasharray="3 4"
-            strokeWidth={1}
-          />
-          <rect x={W - PAD.right + 4} y={lastY - 8} width={PAD.right - 9} height={15} rx={3} fill="#0B0D10" opacity={0.92} />
-          <text x={W - PAD.right + 8} y={lastY + 3} fontSize={9} fill={lastColor} fontFamily="'JetBrains Mono', monospace">
-            {formatPrice(asset.id, lastCandle.c)}
-          </text>
-        </g>
-      )}
-    </svg>
-  );
-}
-
-function ChartEngine({ asset, live }) {
-  const { quotes, status } = useQuotesEngine([asset.id], live);
-  const q = quotes[asset.id];
-  const [timeframe, setTimeframe] = useState("M1");
-  const tf = TIMEFRAMES.find((t) => t.id === timeframe) || TIMEFRAMES[0];
-  const [candles, setCandles] = useState(() => seedCandles(asset.id, seedCountFor(tf.ms), tf.ms));
-  const [view, setView] = useState({ start: 0, count: DEFAULT_VIEW_CANDLES });
-  const [pinned, setPinned] = useState(true);
-
-  // Changement de temporalité → on régénère l'historique adapté et on revient au direct.
-  const selectTimeframe = (id) => {
-    if (id === timeframe) return;
-    setTimeframe(id);
-    const t = TIMEFRAMES.find((x) => x.id === id) || TIMEFRAMES[0];
-    setCandles(seedCandles(asset.id, seedCountFor(t.ms), t.ms));
-    setView({ start: 0, count: DEFAULT_VIEW_CANDLES });
-    setPinned(true);
-  };
-
-  const chartWrapRef = useRef(null);
-  const width = useMeasure(chartWrapRef);
-  const pointersRef = useRef({});
-  const pinchRef = useRef(null);
-  const zoomRef = useRef(null);
-
-  // Live ticks → update the current candle (open a new one every interval).
-  // When a real feed lands and its price is far from our synthetic base
-  // (ex. BTC réel ≠ prix de démo), we re-anchor the whole history by shifting
-  // it — so the chart stays continuous instead of drawing one giant candle.
-  useEffect(() => {
-    if (!q) return;
-    const bid = q.bid;
-    const base = BASE_QUOTES[asset.id];
-    const intervalMs = tf.ms;
-    const BIG_JUMP = Math.max(base.step * 20, Math.abs(base.bid) * 0.01);
-    setCandles((prev) => {
-      const now = Date.now();
-      const bucket = Math.floor(now / intervalMs) * intervalMs;
-      let series = prev;
-      const last = series[series.length - 1];
-      if (!last) return [{ t: bucket, o: bid, h: bid, l: bid, c: bid }];
-      const jump = bid - last.c;
-      if (Math.abs(jump) > BIG_JUMP) {
-        // re-anchor : décaler toute la série pour atterrir sur le prix réel
-        series = series.map((c) => ({ ...c, o: c.o + jump, h: c.h + jump, l: c.l + jump, c: c.c + jump }));
-      }
-      const sLast = series[series.length - 1];
-      let next;
-      if (sLast.t < bucket) {
-        next = [...series, { t: bucket, o: bid, h: bid, l: bid, c: bid }];
-      } else {
-        next = [
-          ...series.slice(0, -1),
-          { ...sLast, h: Math.max(sLast.h, bid), l: Math.min(sLast.l, bid), c: bid },
-        ];
-      }
-      return next.length > MAX_CANDLES ? next.slice(next.length - MAX_CANDLES) : next;
-    });
-  }, [q?.bid, tf.ms]);
-
-  // While pinned, the view stays glued to the latest candles.
-  useEffect(() => {
-    if (!pinned) return;
-    setView((v) => ({ ...v, start: Math.max(0, candles.length - v.count) }));
-  }, [candles.length, pinned]);
-
-  const innerW = Math.max(1, (width || 320) - CHART_PAD.left - CHART_PAD.right);
-
-  // Swipe right (dx > 0) = remonter le temps : on recule le début de la fenêtre.
-  const panPx = (dx) => {
-    const deltaC = (dx * view.count) / innerW;
-    const maxStart = Math.max(0, candles.length - view.count);
-    const start = Math.min(maxStart, Math.max(0, view.start - deltaC));
-    setPinned(start >= maxStart - 1e-6);
-    setView((v) => ({ ...v, start }));
-  };
-
-  // ratio > 1 → zoom avant (moins de bougies visibles).
-  const zoomBy = (ratio) => {
-    setView((v) => {
-      const count = Math.min(MAX_VIEW_CANDLES, Math.max(MIN_VIEW_CANDLES, Math.round(v.count / ratio)));
-      const maxStart = Math.max(0, candles.length - count);
-      let start = pinned ? maxStart : v.start + v.count / 2 - count / 2;
-      start = Math.min(maxStart, Math.max(0, start));
-      return { count, start };
-    });
-  };
-
-  const goLive = () => {
-    setPinned(true);
-    setView((v) => ({ ...v, start: Math.max(0, candles.length - v.count) }));
-  };
-
-  zoomRef.current = (factor) => zoomBy(factor);
-
-  // Molette (desktop) — non-passive pour bloquer le scroll de la page.
-  useEffect(() => {
-    const el = chartWrapRef.current;
-    if (!el) return;
-    const onWheel = (e) => {
-      e.preventDefault();
-      zoomRef.current(e.deltaY < 0 ? 1.15 : 1 / 1.15);
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  }, []);
-
-  const onPointerDown = (e) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
-    pointersRef.current[e.pointerId] = { x: e.clientX, y: e.clientY };
-    const ids = Object.keys(pointersRef.current);
-    if (ids.length === 2) {
-      const [a, b] = ids.map((id) => pointersRef.current[id]);
-      pinchRef.current = Math.hypot(a.x - b.x, a.y - b.y);
-    } else {
-      pinchRef.current = null;
-    }
-  };
-
-  const onPointerMove = (e) => {
-    const pts = pointersRef.current;
-    if (!(e.pointerId in pts)) return;
-    const prev = pts[e.pointerId];
-    pts[e.pointerId] = { x: e.clientX, y: e.clientY };
-    const ids = Object.keys(pts);
-    if (ids.length === 1) {
-      const dx = e.clientX - prev.x;
-      if (dx) panPx(dx);
-    } else if (ids.length === 2) {
-      const [a, b] = ids.map((id) => pts[id]);
-      const dist = Math.hypot(a.x - b.x, a.y - b.y);
-      if (pinchRef.current && dist > 0) zoomBy(dist / pinchRef.current);
-      pinchRef.current = dist;
-    }
-  };
-
-  const onPointerEnd = (e) => {
-    delete pointersRef.current[e.pointerId];
-    pinchRef.current = null;
-  };
-
-  const base = BASE_QUOTES[asset.id];
-  const bid = q ? q.bid : base.bid;
-  const seriesOpen = candles.length ? candles[0].o : bid;
-  const change = bid - seriesOpen;
-  const changePct = seriesOpen ? (change / seriesOpen) * 100 : 0;
-  const positive = change >= 0;
-  const isLive = status[asset.id] === "live";
-  const isError = status[asset.id] === "error";
-  const bidSplit = splitPrice(asset.id, bid);
-
-  const visible = candles.slice(view.start, view.start + view.count);
-  const visHigh = visible.length ? Math.max(...visible.map((c) => c.h)) : bid;
-  const visLow = visible.length ? Math.min(...visible.map((c) => c.l)) : bid;
-
-  return (
-    <div
-      style={{
-        background: "#14171C",
-        border: "1px solid #22262D",
-        borderRadius: 16,
-        padding: 16,
-      }}
-    >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: 999,
-                background: asset.color,
-                boxShadow: `0 0 8px ${asset.color}`,
-              }}
-            />
-            <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 700, color: "#EDEBE6" }}>
-              {asset.short}
-            </span>
-          </div>
-          <div style={{ fontFamily: "'Inter', sans-serif", fontSize: 11.5, color: "#6B7280", marginTop: 3 }}>
-            {asset.label}
-          </div>
-        </div>
-        <div style={{ textAlign: "right" }}>
-          <div
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: 999,
-              background: isLive ? "#2FBF71" : isError ? "#E5484D" : SECONDARY,
-              marginLeft: "auto",
-              boxShadow: `0 0 8px ${isLive ? "#2FBF71" : isError ? "#E5484D" : SECONDARY}`,
-            }}
-          />
-          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#6B7280", marginTop: 6 }}>
-            {isLive ? "live" : isError ? "erreur" : "simulé"}
-          </div>
-        </div>
-      </div>
-
-      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginTop: 12 }}>
-        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 26, color: PRIMARY, lineHeight: 1 }}>
-          {bidSplit.head}
-          <span style={{ fontWeight: 700, fontSize: 33 }}>{bidSplit.tail}</span>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, paddingBottom: 4 }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 3,
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 13,
-              fontWeight: 700,
-              color: positive ? "#2FBF71" : "#FF3EA5",
-            }}
-          >
-            {positive ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
-            {changePct.toFixed(2)}%
-          </div>
-          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#6B7280" }}>
-            {positive ? "+" : ""}
-            {formatPrice(asset.id, change)}
-          </div>
-        </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 6, marginTop: 14, overflowX: "auto" }}>
-        {TIMEFRAMES.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => selectTimeframe(t.id)}
-            style={{
-              padding: "5px 11px",
-              borderRadius: 8,
-              border: `1px solid ${timeframe === t.id ? SECONDARY : "#2A2E35"}`,
-              background: timeframe === t.id ? `${SECONDARY}14` : "transparent",
-              color: timeframe === t.id ? PRIMARY : "#7C828C",
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 11.5,
-              fontWeight: 600,
-              letterSpacing: 0.5,
-              flexShrink: 0,
-              transition: "all 0.15s ease",
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      <div ref={chartWrapRef} style={{ position: "relative", marginTop: 12, touchAction: "none" }}>
-        <CandleChartSvg candles={candles} start={view.start} count={view.count} width={width} asset={asset} intervalMs={tf.ms} />
-        <div
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerEnd}
-          onPointerCancel={onPointerEnd}
-          style={{ position: "absolute", top: 0, right: 0, bottom: 0, left: 0, touchAction: "none", cursor: "grab" }}
-        />
-      </div>
-
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
-        <button
-          onClick={() => zoomBy(1.25)}
-          aria-label="Zoomer"
-          style={{
-            width: 30,
-            height: 30,
-            borderRadius: 8,
-            border: "1px solid #2A2E35",
-            background: "#1B1E24",
-            color: "#EDEBE6",
-            fontFamily: "'JetBrains Mono', monospace",
-            fontSize: 16,
-            lineHeight: 1,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          +
-        </button>
-        <button
-          onClick={() => zoomBy(0.8)}
-          aria-label="Dézoomer"
-          style={{
-            width: 30,
-            height: 30,
-            borderRadius: 8,
-            border: "1px solid #2A2E35",
-            background: "#1B1E24",
-            color: "#EDEBE6",
-            fontFamily: "'JetBrains Mono', monospace",
-            fontSize: 16,
-            lineHeight: 1,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          −
-        </button>
-        <div style={{ flex: 1 }} />
-        {!pinned && (
-          <button
-            onClick={goLive}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "6px 11px",
-              borderRadius: 999,
-              border: "1px solid #2FBF71",
-              background: "#2FBF7114",
-              color: "#2FBF71",
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 11,
-              fontWeight: 600,
-            }}
-          >
-            <span style={{ width: 6, height: 6, borderRadius: 999, background: "#2FBF71", boxShadow: "0 0 6px #2FBF71" }} />
-            Retour au direct
-          </button>
-        )}
-      </div>
-      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "#6B7280", marginTop: 8 }}>
-        Glisse vers la droite pour remonter le temps · pince ou molette pour zoomer
-      </div>
-
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          paddingTop: 10,
-          borderTop: "1px solid #22262D",
-          marginTop: 6,
-        }}
-      >
-        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "#6B7280" }}>
-          Ouv: {formatPrice(asset.id, seriesOpen)}
-        </span>
-        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "#6B7280" }}>
-          H: {formatPrice(asset.id, visHigh)}
-        </span>
-        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "#6B7280" }}>
-          B: {formatPrice(asset.id, visLow)}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function ChartTab({ live }) {
-  const [assetId, setAssetId] = useState("XAUUSD");
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", minHeight: "calc(100dvh - 150px)" }}>
-      <ScreenHeader eyebrow="Prix en direct" title="Graphique" />
-
-      <div style={{ padding: "0 20px" }}>
-        <ChartEngine key={assetId} asset={ASSET_MAP[assetId]} live={live} />
-      </div>
-
-      <div style={{ flex: 1 }} />
-
-      <div style={{ padding: "14px 20px 8px", borderTop: "1px solid #22262D" }}>
-        <div
-          style={{
-            fontFamily: "'JetBrains Mono', monospace",
-            fontSize: 10.5,
-            letterSpacing: 1,
-            color: "#6B7280",
-            textTransform: "uppercase",
-            marginBottom: 9,
-          }}
-        >
-          Actif
-        </div>
-        <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 4 }}>
-          {ASSETS.map((a) => (
-            <AssetChip key={a.id} asset={a} active={assetId === a.id} onClick={() => setAssetId(a.id)} />
-          ))}
         </div>
       </div>
     </div>
@@ -1910,20 +1410,18 @@ function ChartTab({ live }) {
 const TABS = [
   { id: "news", label: "Actus", icon: Newspaper },
   { id: "strategies", label: "Stratégies", icon: LineChart },
-  { id: "chart", label: "Graphique", icon: CandlestickChart },
   { id: "quotes", label: "Cotations", icon: Activity },
   { id: "settings", label: "Réglages", icon: SettingsIcon },
 ];
 
-// Toutes les sources temps réel sont activées par défaut, clés incluses.
-const LIVE_CONFIG = {
-  BTCUSD: true,
-  EURUSD: true,
-  aaplKey: "da3313pr01qupvfbfvu0da3313pr01qupvfbfvug",
-  aaplEnabled: true,
-  xauKey: "22b1cc55e9fe28d9243b048fe5f1edf2",
-  xauEnabled: true,
-  newsEnabled: true,
+const DEFAULT_LIVE = {
+  BTCUSD: false,
+  EURUSD: false,
+  aaplKey: "",
+  aaplEnabled: false,
+  xauKey: "",
+  xauEnabled: false,
+  newsEnabled: false,
 };
 
 export default function TradingDesk() {
@@ -1931,6 +1429,34 @@ export default function TradingDesk() {
   const [watchlist, setWatchlist] = useState(["XAUUSD", "BTCUSD", "EURUSD", "AAPL"]);
   const [notif, setNotif] = useState(true);
   const [highImpactOnly, setHighImpactOnly] = useState(false);
+  const [live, setLive] = useState(DEFAULT_LIVE);
+  const [liveLoaded, setLiveLoaded] = useState(false);
+
+  // Load saved connection settings once, on this device.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await window.storage.get("live-settings", false);
+        if (!cancelled && r && r.value) {
+          setLive({ ...DEFAULT_LIVE, ...JSON.parse(r.value) });
+        }
+      } catch (e) {
+        // nothing saved yet
+      } finally {
+        if (!cancelled) setLiveLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Persist whenever the connection settings change.
+  useEffect(() => {
+    if (!liveLoaded) return;
+    window.storage.set("live-settings", JSON.stringify(live), false).catch(() => {});
+  }, [live, liveLoaded]);
 
   return (
     <div
@@ -1947,10 +1473,9 @@ export default function TradingDesk() {
       <style>{FONT_IMPORT}</style>
 
       <div style={{ paddingBottom: 90 }}>
-        {tab === "news" && <NewsTab live={LIVE_CONFIG} />}
+        {tab === "news" && <NewsTab live={live} />}
         {tab === "strategies" && <StrategiesTab />}
-        {tab === "chart" && <ChartTab live={LIVE_CONFIG} />}
-        {tab === "quotes" && <QuotesTab watchlist={watchlist.length ? watchlist : ["XAUUSD"]} live={LIVE_CONFIG} />}
+        {tab === "quotes" && <QuotesTab watchlist={watchlist.length ? watchlist : ["XAUUSD"]} live={live} />}
         {tab === "settings" && (
           <SettingsTab
             watchlist={watchlist}
@@ -1959,6 +1484,8 @@ export default function TradingDesk() {
             setNotif={setNotif}
             highImpactOnly={highImpactOnly}
             setHighImpactOnly={setHighImpactOnly}
+            live={live}
+            setLive={setLive}
           />
         )}
       </div>
@@ -2019,5 +1546,5 @@ export default function TradingDesk() {
 const rootEl = document.getElementById("root");
 createRoot(rootEl).render(<TradingDesk />);
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2e4c9e26ef16fc6',t:'MTc4NzI2NDQ2MQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</body>
 </html>
